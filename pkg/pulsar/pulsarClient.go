@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	sysResponse "github.com/factory24/flow-system/pkg/response"
+	sysResponse "github.com/factory24/everyflow-system/pkg/response"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/apache/pulsar-client-go/pulsar/crypto"

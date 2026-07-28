@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/factory24/flow-system/pkg/models"
-	"github.com/factory24/flow-system/pkg/response"
+	"github.com/factory24/everyflow-system/pkg/models"
+	"github.com/factory24/everyflow-system/pkg/response"
 	"github.com/labstack/echo/v4"
 )
 
