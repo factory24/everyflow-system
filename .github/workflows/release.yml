@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23' # Matching local go.mod
+          go-version-file: go.mod # Single source of truth (currently 1.26.0)
 
       - name: Run Tests
         run: go test -v ./...
