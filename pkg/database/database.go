@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
@@ -60,8 +61,21 @@ func (db *gormDB) getDialect() (gorm.Dialector, string, error) {
 
 	switch dbType {
 	case "sqlite":
-		dbName := fmt.Sprintf("%s.db?parseTime=True", db.cfg.GetDBName())
+		// Name only — no path required, matching the platform convention. The
+		// pragmas matter: without WAL + busy_timeout, two concurrent writers fail
+		// with SQLITE_BUSY, and a read-then-write transaction deadlocks with
+		// SQLITE_BUSY_SNAPSHOT (517), which busy_timeout will NOT retry.
+		dbName := fmt.Sprintf("%s.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)",
+			db.cfg.GetDBName())
 		d = sqlite.Open(dbName)
+
+		// SQLite in a container is nearly always a misconfiguration: the file lives
+		// in the pod's ephemeral filesystem, so every restart silently loses the
+		// data. Say so loudly rather than let it look healthy.
+		if inContainer() {
+			log.Printf("database: ⚠ WARNING — SQLite inside a container. DATA WILL BE " +
+				"LOST ON RESTART. Set DB.TYPE=postgres (DB_TYPE) for any deployed environment.")
+		}
 	case "postgres":
 		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s",
 			db.cfg.GetDBHost(),
@@ -147,4 +161,15 @@ func (db *gormDB) MigrateDB() {
 		}
 		log.Println("tables migrated successfully!")
 	}
+}
+
+// inContainer reports whether we're running inside a container, so a SQLite
+// fallback can be flagged as the misconfiguration it almost certainly is.
+// Kubernetes always injects KUBERNETES_SERVICE_HOST; /.dockerenv covers Docker.
+func inContainer() bool {
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return true
+	}
+	_, err := os.Stat("/.dockerenv")
+	return err == nil
 }
