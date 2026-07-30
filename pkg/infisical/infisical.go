@@ -13,13 +13,32 @@ type InfisicalClient interface {
 	Connect()
 }
 
+// cfg reads an Infisical setting, accepting BOTH the dotted spelling
+// (`INFISICAL.ENV`, the flow-platform convention) and the underscored one
+// (`INFISICAL_ENV`).
+//
+// This matters in Kubernetes: a ConfigMap mounted with `envFrom` has every key
+// validated as a C_IDENTIFIER, and kubelet **silently skips** any key containing a
+// dot — recording only an `InvalidVariableNames` event. So `INFISICAL.ENV` in a
+// ConfigMap never reaches the process, and the service starts up looking healthy
+// while loading no secrets at all.
+//
+// Accepting both means the deployed ConfigMap can use the valid underscored keys
+// while existing dotted `.env` files and local setups keep working unchanged.
+func cfg(name string) string {
+	if v := os.Getenv("INFISICAL." + name); v != "" {
+		return v
+	}
+	return os.Getenv("INFISICAL_" + name)
+}
+
 type infisicalClient struct {
 	client infisical.InfisicalClientInterface
 }
 
 func (i *infisicalClient) Connect() {
 	i.client = infisical.NewInfisicalClient(context.Background(), infisical.Config{
-		SiteUrl:          os.Getenv("INFISICAL.SITE_URL"),
+		SiteUrl:          cfg("SITE_URL"),
 		AutoTokenRefresh: true,
 	})
 
@@ -30,13 +49,13 @@ func (i *infisicalClient) Connect() {
 	log.Println("Authentication successful")
 
 	// Load service-specific secrets from INFISICAL.SECRET_PATH env var
-	secretPath := os.Getenv("INFISICAL.SECRET_PATH")
+	secretPath := cfg("SECRET_PATH")
 	if secretPath == "" {
-		log.Println("INFISICAL.SECRET_PATH not set, skipping service-specific secrets")
+		log.Println("INFISICAL SECRET_PATH not set (INFISICAL.SECRET_PATH / INFISICAL_SECRET_PATH), skipping service-specific secrets")
 	} else {
 		_, err = i.client.Secrets().List(infisical.ListSecretsOptions{
-			ProjectID:          os.Getenv("INFISICAL.PROJECT"),
-			Environment:        os.Getenv("INFISICAL.ENV"),
+			ProjectID:          cfg("PROJECT"),
+			Environment:        cfg("ENV"),
 			SecretPath:         secretPath,
 			AttachToProcessEnv: true,
 		})
@@ -48,8 +67,8 @@ func (i *infisicalClient) Connect() {
 
 	// Load root-level secrets
 	_, err = i.client.Secrets().List(infisical.ListSecretsOptions{
-		ProjectID:          os.Getenv("INFISICAL.PROJECT"),
-		Environment:        os.Getenv("INFISICAL.ENV"),
+		ProjectID:          cfg("PROJECT"),
+		Environment:        cfg("ENV"),
 		SecretPath:         "/",
 		AttachToProcessEnv: true,
 	})
