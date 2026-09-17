@@ -37,7 +37,15 @@ type Claims struct {
 	// Verified is true only when the signature was checked against the JWKS.
 	// Handlers that mutate state should refuse unverified claims in production.
 	Verified bool
+	// Service names the calling service when this is an internal service-to-service
+	// token rather than a human's. Empty for user tokens. Always signature-checked
+	// (there is no decode-only path for service tokens), so a non-empty Service
+	// means the caller proved possession of that service's private key.
+	Service string
 }
+
+// IsService reports whether these claims came from an internal service caller.
+func (c *Claims) IsService() bool { return c != nil && c.Service != "" }
 
 var (
 	ErrMalformed = errors.New("malformed token")
@@ -93,9 +101,22 @@ func DefaultVerifier() *Verifier {
 	return verifier
 }
 
-// VerifyOrDecode verifies the token against the JWKS when configured, otherwise
-// falls back to the decode-only path. Claims.Verified reports which happened.
+// VerifyOrDecode resolves a bearer token to claims.
+//
+// Internal service tokens are routed to the Ed25519 path FIRST and are always
+// signature-checked — there is deliberately no decode-only fallback for them, so
+// turning off the JWKS for local dev can never also disable service auth.
+// Everything else is a user token: verified against the Openfort JWKS when
+// configured, otherwise decoded only (dev/demo). Claims.Verified says which.
 func VerifyOrDecode(ctx context.Context, token string) (*Claims, error) {
+	if peekIssuer(token) == ServiceIssuer {
+		keys := ServicePublicKeys()
+		if len(keys) == 0 {
+			// Fail closed: a service token arrived but we hold no keys to check it.
+			return nil, ErrUnknownService
+		}
+		return VerifyServiceToken(token, keys)
+	}
 	if v := DefaultVerifier(); v.Enabled() {
 		return v.Verify(ctx, token)
 	}
@@ -135,7 +156,15 @@ func Interceptor() connect.UnaryInterceptorFunc {
 			if err != nil {
 				return nil, connect.NewError(connect.CodeUnauthenticated, err)
 			}
-			return next(NewContext(ctx, claims), req)
+			ctx = NewContext(ctx, claims)
+			// Carry a USER's token so downstream hops can act as that user. A
+			// service token is deliberately NOT propagated: when this service
+			// calls onward it should assert its own identity, not replay the
+			// identity of whichever service called it.
+			if !claims.IsService() {
+				ctx = NewTokenContext(ctx, token)
+			}
+			return next(ctx, req)
 		}
 	})
 }
