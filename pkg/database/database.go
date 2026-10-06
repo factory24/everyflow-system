@@ -6,8 +6,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
@@ -60,6 +60,10 @@ func (db *gormDB) getDialect() (gorm.Dialector, string, error) {
 
 	switch dbType {
 	case "sqlite":
+		// glebarez/sqlite (pure Go, no cgo) — every service's Dockerfile builds
+		// with CGO_ENABLED=0 into a distroless/static final image with no libc at
+		// all, which the cgo-based gorm.io/driver/sqlite (mattn/go-sqlite3) can't
+		// run in. sqlite is the local-dev default; production uses postgres.
 		dbName := fmt.Sprintf("%s.db?parseTime=True", db.cfg.GetDBName())
 		d = sqlite.Open(dbName)
 	case "postgres":

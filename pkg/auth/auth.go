@@ -137,6 +137,22 @@ func RequireToken() bool {
 	return strings.EqualFold(os.Getenv("AUTH_REQUIRE_TOKEN"), "true")
 }
 
+// IsAdminEmail reports whether email is on the ADMIN_EMAILS allowlist
+// (comma-separated, case-insensitive) — the same env var edge-service's
+// config.AdminEmails reads, so "admin" means one thing across services.
+func IsAdminEmail(email string) bool {
+	if email == "" {
+		return false
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+	for _, e := range strings.Split(os.Getenv("ADMIN_EMAILS"), ",") {
+		if strings.ToLower(strings.TrimSpace(e)) == email {
+			return true
+		}
+	}
+	return false
+}
+
 type ctxKey struct{}
 
 // Interceptor validates a Bearer token when present and attaches claims to ctx.
