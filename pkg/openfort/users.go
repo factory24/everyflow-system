@@ -120,12 +120,13 @@ func (c UsersConfig) ListUsers(ctx context.Context, p ListUsersParams) ([]User, 
 
 // UsersHandler returns the GET handler for /api/admin/openfort-users.
 //
-// Admin-gated: this returns every project account's name/email/phone in one
-// response, so a PRESENT bearer token must verify and its email must be on
-// ADMIN_EMAILS, regardless of AUTH_REQUIRE_TOKEN. A MISSING token follows the
-// same AUTH_REQUIRE_TOKEN posture as the rest of the edge (auth.Interceptor),
-// so local/demo mode keeps working before real login is wired — matching the
-// permissiveness that already applies to user-service's own ListUsers today.
+// Admin-gated, ALWAYS: this returns every project account's name/email/phone in
+// one response, so a bearer token is required whatever AUTH_REQUIRE_TOKEN says,
+// and the caller's identity is resolved exactly as AdminGateInterceptor does
+// (resolveCallerEmail — a signature-verified token, else Openfort's own
+// answer; never an unsigned payload) and must be on ADMIN_EMAILS. The
+// AUTH_REQUIRE_TOKEN demo-mode leniency that applies to the rest of the edge
+// is deliberately NOT extended to this PII endpoint.
 func UsersHandler(cfg UsersConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := cfg.AllowOrigin
@@ -144,14 +145,14 @@ func UsersHandler(cfg UsersConfig) http.HandlerFunc {
 			return
 		}
 
-		if token := auth.BearerToken(r.Header); token != "" {
-			claims, err := auth.VerifyOrDecode(r.Context(), token)
-			if err != nil || !auth.IsAdminEmail(claims.Email) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		} else if auth.RequireToken() {
+		token := auth.BearerToken(r.Header)
+		if token == "" {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		email, err := resolveCallerEmail(r.Context(), cfg, token)
+		if err != nil || !auth.IsAdminEmail(email) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 

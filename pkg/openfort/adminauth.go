@@ -44,14 +44,21 @@ func AdminGateInterceptor(cfg UsersConfig, protected map[string]bool) connect.Un
 	})
 }
 
-// resolveCallerEmail tries a local JWT decode first — which starts working on
+// resolveCallerEmail tries a local JWT check first — which starts working on
 // its own once OPENFORT_JWKS_URL is configured for real verification — and
 // falls back to asking Openfort directly who the token belongs to. The
 // fallback is what actually fires today: the browser's Openfort access token
 // (from the SDK's getAccessToken()) is an opaque session credential, not a
-// JWT, so the local decode always fails first.
+// JWT, so the local check always fails first.
+//
+// The locally-read email is trusted ONLY when the signature was verified
+// (Claims.Verified). Without OPENFORT_JWKS_URL, VerifyOrDecode merely decodes
+// the payload, so anyone can mint an unsigned JWT naming an ADMIN_EMAILS
+// address; accepting that would let a caller pick the weak path just by
+// sending a JWT-shaped token. An unverified token is therefore treated like an
+// opaque one and sent to Openfort, which actually authenticates it.
 func resolveCallerEmail(ctx context.Context, cfg UsersConfig, token string) (string, error) {
-	if claims, err := auth.VerifyOrDecode(ctx, token); err == nil {
+	if claims, err := auth.VerifyOrDecode(ctx, token); err == nil && claims.Verified {
 		return claims.Email, nil
 	}
 	me, err := cfg.WhoAmI(ctx, token)
