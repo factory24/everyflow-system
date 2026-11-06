@@ -184,3 +184,33 @@ func TestInterceptor_RequireWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestInterceptor_RequireWrites_ServiceSecretAndListUsers(t *testing.T) {
+	t.Setenv("AUTH_REQUIRE_TOKEN", "")
+	t.Setenv("AUTH_REQUIRE_WRITES", "true")
+	t.Setenv("EVERYFLOW_SERVICE_SECRET", "s3cret")
+
+	if reached, err := callProcedure(t, "/user.v1.UserService/ListUsers", ""); connect.CodeOf(err) != connect.CodeUnauthenticated || reached {
+		t.Fatalf("anonymous ListUsers: want Unauthenticated, got err=%v reached=%v", err, reached)
+	}
+
+	run := func(secret string) (bool, error) {
+		reached := false
+		next := func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+			reached = true
+			return connect.NewResponse(&struct{}{}), nil
+		}
+		req := &procReq{Request: connect.NewRequest(&struct{}{}), proc: "/recharge.v1.RechargeService/RecordRecharge"}
+		if secret != "" {
+			req.Header().Set("X-Everyflow-Service-Secret", secret)
+		}
+		_, err := Interceptor()(next)(context.Background(), req)
+		return reached, err
+	}
+	if reached, err := run("s3cret"); err != nil || !reached {
+		t.Fatalf("service secret: want pass, got err=%v reached=%v", err, reached)
+	}
+	if reached, err := run("wrong"); connect.CodeOf(err) != connect.CodeUnauthenticated || reached {
+		t.Fatalf("wrong secret: want Unauthenticated, got err=%v reached=%v", err, reached)
+	}
+}
