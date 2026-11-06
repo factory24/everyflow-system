@@ -11,6 +11,7 @@
 //
 // `AUTH_REQUIRE_TOKEN=true` additionally rejects requests carrying no Bearer token
 // (the default is permissive so the dashboard's mock/demo mode keeps working).
+// `AUTH_REQUIRE_WRITES=true` rejects only token-less calls to non-read procedures.
 package auth
 
 import (
@@ -137,6 +138,26 @@ func RequireToken() bool {
 	return strings.EqualFold(os.Getenv("AUTH_REQUIRE_TOKEN"), "true")
 }
 
+// RequireWrites reports whether anonymous calls to non-read procedures are refused
+// (AUTH_REQUIRE_WRITES). Reads stay open so the public demo can render.
+func RequireWrites() bool {
+	return strings.EqualFold(os.Getenv("AUTH_REQUIRE_WRITES"), "true")
+}
+
+var readPrefixes = []string{"List", "Get", "Quote", "Preview", "Describe", "Check", "Resolve", "Ping"}
+
+// IsReadProcedure reports whether a Connect procedure ("/pkg.v1.Service/Method")
+// is a read, by the method-name convention used across the Everyflow protos.
+func IsReadProcedure(procedure string) bool {
+	m := procedure[strings.LastIndex(procedure, "/")+1:]
+	for _, p := range readPrefixes {
+		if strings.HasPrefix(m, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsAdminEmail reports whether email is on the ADMIN_EMAILS allowlist
 // (comma-separated, case-insensitive) — the same env var edge-service's
 // config.AdminEmails reads, so "admin" means one thing across services.
@@ -163,7 +184,7 @@ func Interceptor() connect.UnaryInterceptorFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			token := BearerToken(req.Header())
 			if token == "" {
-				if RequireToken() {
+				if RequireToken() || (RequireWrites() && !IsReadProcedure(req.Spec().Procedure)) {
 					return nil, connect.NewError(connect.CodeUnauthenticated, ErrNoToken)
 				}
 				return next(ctx, req)

@@ -142,3 +142,45 @@ func TestInterceptor_BearerPrefixIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("lowercase bearer not accepted, got %q", got)
 	}
 }
+
+func callProcedure(t *testing.T, procedure, authzHeader string) (bool, error) {
+	t.Helper()
+	reached := false
+	next := func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+		reached = true
+		return connect.NewResponse(&struct{}{}), nil
+	}
+	req := &procReq{Request: connect.NewRequest(&struct{}{}), proc: procedure}
+	if authzHeader != "" {
+		req.Header().Set("Authorization", authzHeader)
+	}
+	_, err := Interceptor()(next)(context.Background(), req)
+	return reached, err
+}
+
+type procReq struct {
+	*connect.Request[struct{}]
+	proc string
+}
+
+func (r *procReq) Spec() connect.Spec { return connect.Spec{Procedure: r.proc} }
+
+func TestInterceptor_RequireWrites(t *testing.T) {
+	t.Setenv("AUTH_REQUIRE_TOKEN", "")
+	t.Setenv("AUTH_REQUIRE_WRITES", "true")
+	valid := "Bearer " + makeToken(map[string]any{"sub": "u1", "exp": time.Now().Add(time.Hour).Unix()})
+
+	for _, proc := range []string{"/recharge.v1.RechargeService/RecordRecharge", "/market.v1.MarketService/Buy", "/token.v1.TokenService/MintNft"} {
+		if reached, err := callProcedure(t, proc, ""); connect.CodeOf(err) != connect.CodeUnauthenticated || reached {
+			t.Fatalf("%s anonymous: want Unauthenticated, got err=%v reached=%v", proc, err, reached)
+		}
+		if reached, err := callProcedure(t, proc, valid); err != nil || !reached {
+			t.Fatalf("%s signed-in: want pass, got err=%v reached=%v", proc, err, reached)
+		}
+	}
+	for _, proc := range []string{"/recharge.v1.RechargeService/ListVaults", "/market.v1.MarketService/GetPoolTerms", "/market.v1.MarketService/Quote"} {
+		if reached, err := callProcedure(t, proc, ""); err != nil || !reached {
+			t.Fatalf("%s anonymous read: want pass, got err=%v reached=%v", proc, err, reached)
+		}
+	}
+}
