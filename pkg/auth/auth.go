@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -146,9 +147,15 @@ func RequireWrites() bool {
 
 var readPrefixes = []string{"List", "Get", "Quote", "Preview", "Describe", "Check", "Resolve", "Ping"}
 
+// sensitiveReads are List* procedures that expose personal data and so are gated like writes.
+var sensitiveReads = map[string]bool{"/user.v1.UserService/ListUsers": true}
+
 // IsReadProcedure reports whether a Connect procedure ("/pkg.v1.Service/Method")
 // is a read, by the method-name convention used across the Everyflow protos.
 func IsReadProcedure(procedure string) bool {
+	if sensitiveReads[procedure] {
+		return false
+	}
 	m := procedure[strings.LastIndex(procedure, "/")+1:]
 	for _, p := range readPrefixes {
 		if strings.HasPrefix(m, p) {
@@ -156,6 +163,16 @@ func IsReadProcedure(procedure string) bool {
 		}
 	}
 	return false
+}
+
+const serviceSecretHeader = "X-Everyflow-Service-Secret"
+
+// hasServiceSecret reports whether the request carries this deployment's internal-hop
+// secret (EVERYFLOW_SERVICE_SECRET), compared in constant time.
+func hasServiceSecret(h http.Header) bool {
+	want := os.Getenv("EVERYFLOW_SERVICE_SECRET")
+	got := h.Get(serviceSecretHeader)
+	return want != "" && got != "" && subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }
 
 // IsAdminEmail reports whether email is on the ADMIN_EMAILS allowlist
@@ -184,6 +201,9 @@ func Interceptor() connect.UnaryInterceptorFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			token := BearerToken(req.Header())
 			if token == "" {
+				if hasServiceSecret(req.Header()) {
+					return next(ctx, req)
+				}
 				if RequireToken() || (RequireWrites() && !IsReadProcedure(req.Spec().Procedure)) {
 					return nil, connect.NewError(connect.CodeUnauthenticated, ErrNoToken)
 				}
