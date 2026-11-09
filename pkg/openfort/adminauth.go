@@ -9,6 +9,7 @@ package openfort
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"connectrpc.com/connect"
 
@@ -69,4 +70,28 @@ func resolveCallerEmail(ctx context.Context, cfg UsersConfig, token string) (str
 		return "", errors.New("openfort: caller has no email on file")
 	}
 	return *me.Email, nil
+}
+
+func AdminGateMiddleware(cfg UsersConfig, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := auth.BearerToken(r.Header)
+		if token == "" {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		email, err := resolveCallerEmail(r.Context(), cfg, token)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !auth.IsAdminEmail(email) {
+			http.Error(w, "admin only", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

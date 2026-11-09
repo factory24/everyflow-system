@@ -192,3 +192,39 @@ func TestUsersHandler_RequiresAdminIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestAdminGateMiddleware(t *testing.T) {
+	adminOnly(t)
+	f := newFakeOpenfort(t, map[string]string{"opaque-admin": "admin@everyflow.io", "opaque-user": "user@x.io"})
+
+	for _, c := range []struct {
+		name      string
+		method    string
+		token     string
+		wantCode  int
+		wantReach bool
+	}{
+		{"no token", http.MethodPost, "", http.StatusUnauthorized, false},
+		{"unknown opaque token", http.MethodPost, "garbage", http.StatusUnauthorized, false},
+		{"forged JWT naming an admin", http.MethodPost, unsignedJWT("admin@everyflow.io"), http.StatusUnauthorized, false},
+		{"real non-admin", http.MethodPost, "opaque-user", http.StatusForbidden, false},
+		{"real admin", http.MethodPost, "opaque-admin", http.StatusOK, true},
+		{"preflight needs no credentials", http.MethodOptions, "", http.StatusOK, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			reached := false
+			h := AdminGateMiddleware(f.cfg(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+			}))
+			r := httptest.NewRequest(c.method, "/x", nil)
+			if c.token != "" {
+				r.Header.Set("Authorization", "Bearer "+c.token)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != c.wantCode || reached != c.wantReach {
+				t.Fatalf("status=%d reached=%v, want status=%d reached=%v", w.Code, reached, c.wantCode, c.wantReach)
+			}
+		})
+	}
+}
