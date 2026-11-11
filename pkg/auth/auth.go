@@ -8,6 +8,9 @@
 //     Openfort JWKS, plus exp/nbf and optional iss/aud. See jwks.go.
 //   - **Decode-only** (no JWKS URL): claims are decoded and expiry checked but the
 //     signature is NOT verified. Local dev / demo only; logged loudly at startup.
+//   - **Opaque** (a token that is not JWT-shaped — what Openfort's browser SDK actually
+//     hands out): resolved by asking Openfort who it belongs to, cached briefly, and
+//     marked Verified because Openfort itself authenticated it. See opaque.go.
 //
 // `AUTH_REQUIRE_TOKEN=true` additionally rejects requests carrying no Bearer token
 // (the default is permissive so the dashboard's mock/demo mode keeps working).
@@ -118,6 +121,12 @@ func VerifyOrDecode(ctx context.Context, token string) (*Claims, error) {
 			return nil, ErrUnknownService
 		}
 		return VerifyServiceToken(token, keys)
+	}
+	// Not JWT-shaped → an opaque Openfort session token (what the browser SDK hands out). Only
+	// Openfort can say whose it is; see opaque.go. When no project is configured this stays
+	// off and the token falls through to be rejected as malformed, exactly as before.
+	if !looksLikeJWT(token) && OpaqueEnabled() {
+		return resolveOpaque(ctx, token)
 	}
 	if v := DefaultVerifier(); v.Enabled() {
 		return v.Verify(ctx, token)
