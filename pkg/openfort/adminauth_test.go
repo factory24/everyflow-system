@@ -316,3 +316,26 @@ func TestAdminGate_UnverifiedAdminEmailIsRefused(t *testing.T) {
 		t.Errorf("escape hatch on: reached=%v denied=%v, want admitted", reached, denied)
 	}
 }
+
+// With OPENFORT_PUBLISHABLE_KEY set (the production posture) the opaque token is resolved by the auth
+// package BEFORE the WhoAmI fallback, and an unverified email comes back as an empty one. The caller is
+// then authenticated but not an admin: 403, never admitted. Distinct tokens: the auth package caches
+// lookups for a minute.
+func TestAdminGate_UnverifiedAdminEmailIsRefusedOnTheOpaquePath(t *testing.T) {
+	adminOnly(t)
+	t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", "")
+	f := newFakeOpenfort(t, map[string]string{
+		"OpaquePathVerifiedAdminToken0000000000000000000000000000000000000000": "admin@everyflow.io",
+		"OpaquePathUnverifiedAdminToken000000000000000000000000000000000000000": "admin@everyflow.io",
+	})
+	f.unverified = map[string]bool{"OpaquePathUnverifiedAdminToken000000000000000000000000000000000000000": true}
+	t.Setenv("OPENFORT_API_BASE_URL", f.URL)
+	t.Setenv("OPENFORT_PUBLISHABLE_KEY", "pk_test_unit")
+
+	if reached, _, denied := gate(t, f.cfg(), "OpaquePathVerifiedAdminToken0000000000000000000000000000000000000000"); !reached || denied {
+		t.Fatalf("control: verified admin on the opaque path must pass (reached=%v denied=%v)", reached, denied)
+	}
+	if reached, code, denied := gate(t, f.cfg(), "OpaquePathUnverifiedAdminToken000000000000000000000000000000000000000"); reached || !denied || code != connect.CodePermissionDenied {
+		t.Errorf("unverified admin email: reached=%v denied=%v code=%v, want refused as permission_denied", reached, denied, code)
+	}
+}
