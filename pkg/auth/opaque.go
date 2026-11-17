@@ -22,6 +22,8 @@
 //	                          derived from OPENFORT_JWKS_URL (…/iam/v1/<pk>/jwks.json).
 //	OPENFORT_API_BASE_URL     default https://api.openfort.io
 //	OPENFORT_OPAQUE_TOKENS    "off" disables this path (kill switch)
+//	OPENFORT_TRUST_UNVERIFIED_EMAIL
+//	                          "true" accepts an email Openfort has not verified (see TrustOpenfortEmail)
 //
 // Standard library only, like the rest of this package (vendored service builds stay offline).
 package auth
@@ -169,8 +171,9 @@ func fetchOpaque(ctx context.Context, token string) (*Claims, error) {
 	}
 
 	var me struct {
-		ID    string  `json:"id"`
-		Email *string `json:"email"`
+		ID            string  `json:"id"`
+		Email         *string `json:"email"`
+		EmailVerified bool    `json:"emailVerified"`
 	}
 	if err := json.Unmarshal(raw, &me); err != nil || me.ID == "" {
 		return nil, ErrOpaqueRejected
@@ -181,10 +184,29 @@ func fetchOpaque(ctx context.Context, token string) (*Claims, error) {
 		Exp:      time.Now().Add(opaquePositiveTTL).Unix(),
 		Verified: true, // Openfort itself authenticated this token
 	}
-	if me.Email != nil {
-		claims.Email = *me.Email
-	}
+	claims.Email = TrustOpenfortEmail(me.Email, me.EmailVerified)
 	return claims, nil
+}
+
+// TrustOpenfortEmail returns the email to use for authorisation decisions (the ADMIN_EMAILS allowlist,
+// a pool sponsor's address), or "" when it should not be used.
+//
+// Openfort's user object carries `emailVerified` (GET /iam/v2/me, documented as a required boolean). An
+// address nobody proved they own must never grant a role: if the project lets someone register or link
+// someone else's address unverified, they would otherwise inherit that person's admin or sponsor rights.
+// So the email counts only when Openfort says it is verified; a missing flag counts as not verified. The
+// caller stays signed in (the subject is still proven), they just do not get the email-based rights.
+//
+// OPENFORT_TRUST_UNVERIFIED_EMAIL=true restores the old behaviour for a project that cannot verify
+// emails; it is an explicit, logged-nowhere-else escape hatch, so leave it unset in production.
+func TrustOpenfortEmail(email *string, verified bool) string {
+	if email == nil || strings.TrimSpace(*email) == "" {
+		return ""
+	}
+	if verified || strings.EqualFold(strings.TrimSpace(os.Getenv("OPENFORT_TRUST_UNVERIFIED_EMAIL")), "true") {
+		return *email
+	}
+	return ""
 }
 
 // resetOpaqueCache is for tests.

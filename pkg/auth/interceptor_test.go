@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -212,5 +214,67 @@ func TestInterceptor_RequireWrites_ServiceSecretAndListUsers(t *testing.T) {
 	}
 	if reached, err := run("wrong"); connect.CodeOf(err) != connect.CodeUnauthenticated || reached {
 		t.Fatalf("wrong secret: want Unauthenticated, got err=%v reached=%v", err, reached)
+	}
+}
+
+// An Openfort outage is "could not check the token", not "the token is bad": the caller gets Unavailable
+// (HTTP 503), is not told they are signed out, and a token Openfort actually refuses is still Unauthenticated.
+func TestInterceptor_OpaqueOutageIsUnavailableNotUnauthenticated(t *testing.T) {
+	f := newFakeOpenfort(t, map[string][2]string{opaqueToken: {"usr_1", "a@x.io"}})
+	useOpenfort(t, f)
+
+	for _, status := range []int32{http.StatusBadGateway, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		f.status.Store(status)
+		resetOpaqueCache()
+		reached, _, err := callInterceptor(t, "Bearer "+opaqueToken)
+		if err == nil || connect.CodeOf(err) != connect.CodeUnavailable || reached {
+			t.Errorf("openfort %d: err=%v reached=%v, want Unavailable and the handler not run", status, err, reached)
+		}
+	}
+
+	f.status.Store(http.StatusUnauthorized) // Openfort answers, and says no
+	resetOpaqueCache()
+	if _, _, err := callInterceptor(t, "Bearer "+opaqueToken); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Errorf("a token Openfort refuses must stay Unauthenticated, got %v", err)
+	}
+
+	f.status.Store(0) // recovered, and the token is good
+	resetOpaqueCache()
+	if reached, _, err := callInterceptor(t, "Bearer "+opaqueToken); err != nil || !reached {
+		t.Errorf("after recovery: err=%v reached=%v", err, reached)
+	}
+}
+
+// Openfort unreachable at the network level (not just a 5xx) is the same outage.
+func TestInterceptor_OpaqueUnreachableIsUnavailable(t *testing.T) {
+	f := newFakeOpenfort(t, nil)
+	useOpenfort(t, f)
+	f.Close() // nothing is listening any more
+	resetOpaqueCache()
+	if _, _, err := callInterceptor(t, "Bearer "+opaqueToken); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("an unreachable Openfort must be Unavailable, got %v", err)
+	}
+}
+
+func TestIsUnavailableAndConnectError(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want connect.Code
+	}{
+		{"opaque outage", fmt.Errorf("%w: boom", ErrOpaqueUnavailable), connect.CodeUnavailable},
+		{"opaque outage, wrapped again", errors.Join(errors.New("ctx"), fmt.Errorf("%w: boom", ErrOpaqueUnavailable)), connect.CodeUnavailable},
+		{"jwks fetch failed", fmt.Errorf("%w: status 500", ErrJWKSUnhealthy), connect.CodeUnavailable},
+		{"opaque rejected", ErrOpaqueRejected, connect.CodeUnauthenticated},
+		{"bad signature", ErrBadSignature, connect.CodeUnauthenticated},
+		{"unknown kid", ErrUnknownKey, connect.CodeUnauthenticated},
+		{"plain error", errors.New("malformed token"), connect.CodeUnauthenticated},
+	} {
+		if got := connect.CodeOf(ConnectError(c.err)); got != c.want {
+			t.Errorf("%s: code %v, want %v", c.name, got, c.want)
+		}
+		if IsUnavailable(c.err) != (c.want == connect.CodeUnavailable) {
+			t.Errorf("%s: IsUnavailable = %v", c.name, IsUnavailable(c.err))
+		}
 	}
 }

@@ -35,7 +35,7 @@ func AdminGateInterceptor(cfg UsersConfig, protected map[string]bool) connect.Un
 			}
 			email, err := resolveCallerEmail(ctx, cfg, token)
 			if err != nil {
-				return nil, connect.NewError(connect.CodeUnauthenticated, err)
+				return nil, auth.ConnectError(err)
 			}
 			if !auth.IsAdminEmail(email) {
 				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("admin only"))
@@ -59,17 +59,22 @@ func AdminGateInterceptor(cfg UsersConfig, protected map[string]bool) connect.Un
 // sending a JWT-shaped token. An unverified token is therefore treated like an
 // opaque one and sent to Openfort, which actually authenticates it.
 func resolveCallerEmail(ctx context.Context, cfg UsersConfig, token string) (string, error) {
-	if claims, err := auth.VerifyOrDecode(ctx, token); err == nil && claims.Verified {
+	claims, err := auth.VerifyOrDecode(ctx, token)
+	if err == nil && claims.Verified {
 		return claims.Email, nil
+	}
+	if auth.IsUnavailable(err) {
+		return "", err // an outage is not a reason to try the fallback or to call the token bad
 	}
 	me, err := cfg.WhoAmI(ctx, token)
 	if err != nil {
 		return "", err
 	}
-	if me.Email == nil || *me.Email == "" {
-		return "", errors.New("openfort: caller has no email on file")
+	email := auth.TrustOpenfortEmail(me.Email, me.EmailVerified)
+	if email == "" {
+		return "", errors.New("openfort: caller has no verified email on file")
 	}
-	return *me.Email, nil
+	return email, nil
 }
 
 func AdminGateMiddleware(cfg UsersConfig, next http.Handler) http.Handler {
@@ -85,6 +90,10 @@ func AdminGateMiddleware(cfg UsersConfig, next http.Handler) http.Handler {
 		}
 		email, err := resolveCallerEmail(r.Context(), cfg, token)
 		if err != nil {
+			if auth.IsUnavailable(err) {
+				http.Error(w, "could not verify the token right now", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

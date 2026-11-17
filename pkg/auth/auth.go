@@ -200,6 +200,24 @@ func IsAdminEmail(email string) bool {
 	return false
 }
 
+// IsUnavailable reports whether a verification error means "the token could not be CHECKED" (Openfort or
+// the JWKS endpoint was unreachable or answered 5xx) rather than "the token is bad". Callers must not
+// tell a user their token is invalid in that case: it is an outage, retryable, and the user is still
+// signed in.
+func IsUnavailable(err error) bool {
+	return errors.Is(err, ErrOpaqueUnavailable) || errors.Is(err, ErrJWKSUnhealthy)
+}
+
+// ConnectError turns a VerifyOrDecode failure into the right Connect error: Unavailable (HTTP 503) when
+// the token could not be checked, Unauthenticated (HTTP 401) when it was checked and refused. Before
+// this, every failure was Unauthenticated, so an Openfort outage looked like "you are signed out".
+func ConnectError(err error) *connect.Error {
+	if IsUnavailable(err) {
+		return connect.NewError(connect.CodeUnavailable, err)
+	}
+	return connect.NewError(connect.CodeUnauthenticated, err)
+}
+
 type ctxKey struct{}
 
 // Interceptor validates a Bearer token when present and attaches claims to ctx.
@@ -220,7 +238,7 @@ func Interceptor() connect.UnaryInterceptorFunc {
 			}
 			claims, err := VerifyOrDecode(ctx, token)
 			if err != nil {
-				return nil, connect.NewError(connect.CodeUnauthenticated, err)
+				return nil, ConnectError(err)
 			}
 			ctx = NewContext(ctx, claims)
 			// Carry a USER's token so downstream hops can act as that user. A

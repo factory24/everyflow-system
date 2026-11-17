@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -24,6 +25,9 @@ type fakeOpenfort struct {
 	status  atomic.Int32 // when non-zero, every call returns this status
 	lastKey atomic.Value // x-project-key of the last call
 	lastTok atomic.Value // bearer token of the last call
+
+	unverified sync.Map    // tokens whose email Openfort reports as NOT verified
+	omitFlag   atomic.Bool // answer without an emailVerified field at all
 }
 
 func newFakeOpenfort(t *testing.T, tokens map[string][2]string) *fakeOpenfort {
@@ -50,6 +54,10 @@ func newFakeOpenfort(t *testing.T, tokens map[string][2]string) *fakeOpenfort {
 		body := map[string]any{"id": who[0]}
 		if who[1] != "" {
 			body["email"] = who[1]
+		}
+		if !f.omitFlag.Load() {
+			_, unv := f.unverified.Load(tok)
+			body["emailVerified"] = !unv
 		}
 		_ = json.NewEncoder(w).Encode(body)
 	}))
@@ -255,5 +263,56 @@ func TestOpaque_InterceptorRefusesAnUnknownToken(t *testing.T) {
 	reached, _, err := callInterceptor(t, "Bearer "+opaqueToken)
 	if reached || connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("reached=%v code=%v — an unknown opaque token must be refused", reached, connect.CodeOf(err))
+	}
+}
+
+// An email Openfort has not verified must not reach authorisation decisions (ADMIN_EMAILS, sponsor
+// match): the caller is still who the token says, but carries no email.
+func TestOpaque_UnverifiedEmailIsNotTrusted(t *testing.T) {
+	f := newFakeOpenfort(t, map[string][2]string{opaqueToken: {"usr_abc123", "admin@everyflow.io"}})
+	useOpenfort(t, f)
+	t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", "")
+	f.unverified.Store(opaqueToken, true)
+
+	c, err := VerifyOrDecode(context.Background(), opaqueToken)
+	if err != nil {
+		t.Fatalf("an unverified email must not make the token invalid: %v", err)
+	}
+	if c.Subject != "usr_abc123" || !c.Verified {
+		t.Errorf("claims = %+v, want the subject kept and Verified=true", c)
+	}
+	if c.Email != "" {
+		t.Errorf("email = %q, want it dropped because Openfort reports it unverified", c.Email)
+	}
+}
+
+func TestOpaque_MissingVerifiedFlagCountsAsUnverified(t *testing.T) {
+	f := newFakeOpenfort(t, map[string][2]string{opaqueToken: {"usr_abc123", "admin@everyflow.io"}})
+	useOpenfort(t, f)
+	t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", "")
+	f.omitFlag.Store(true)
+
+	c, err := VerifyOrDecode(context.Background(), opaqueToken)
+	if err != nil || c.Email != "" || c.Subject != "usr_abc123" {
+		t.Errorf("claims = %+v err = %v, want subject kept and no email", c, err)
+	}
+}
+
+func TestOpaque_TrustUnverifiedEmailSwitch(t *testing.T) {
+	f := newFakeOpenfort(t, map[string][2]string{opaqueToken: {"usr_abc123", "admin@everyflow.io"}})
+	useOpenfort(t, f)
+	f.unverified.Store(opaqueToken, true)
+
+	for _, v := range []string{"false", "yes", "1", ""} { // only an exact "true" opens it
+		t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", v)
+		resetOpaqueCache()
+		if c, _ := VerifyOrDecode(context.Background(), opaqueToken); c == nil || c.Email != "" {
+			t.Errorf("OPENFORT_TRUST_UNVERIFIED_EMAIL=%q: email = %+v, want dropped", v, c)
+		}
+	}
+	t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", "true")
+	resetOpaqueCache()
+	if c, _ := VerifyOrDecode(context.Background(), opaqueToken); c == nil || c.Email != "admin@everyflow.io" {
+		t.Errorf("with the switch on, email = %+v, want admin@everyflow.io", c)
 	}
 }

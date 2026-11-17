@@ -12,6 +12,8 @@ import (
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/factory24/everyflow-system/pkg/auth"
 )
 
 const testProcedure = "/test.v1.Admin/Mutate"
@@ -33,6 +35,8 @@ func unsignedJWT(email string) string {
 type fakeOpenfort struct {
 	*httptest.Server
 	meCalls, usersCalls int
+	unverified          map[string]bool // tokens whose email is reported as not verified
+	omitFlag            bool            // answer without an emailVerified field
 }
 
 func newFakeOpenfort(t *testing.T, tokens map[string]string) *fakeOpenfort {
@@ -47,7 +51,11 @@ func newFakeOpenfort(t *testing.T, tokens map[string]string) *fakeOpenfort {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "usr_1", "email": email})
+			body := map[string]any{"id": "usr_1", "email": email}
+			if !f.omitFlag {
+				body["emailVerified"] = !f.unverified[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+			}
+			_ = json.NewEncoder(w).Encode(body)
 		case "/v2/users":
 			f.usersCalls++
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -226,5 +234,85 @@ func TestAdminGateMiddleware(t *testing.T) {
 				t.Fatalf("status=%d reached=%v, want status=%d reached=%v", w.Code, reached, c.wantCode, c.wantReach)
 			}
 		})
+	}
+}
+
+// An Openfort outage while checking an admin must not read as "you are not signed in": the gate answers
+// Unavailable (503 on the HTTP middleware), a token Openfort refuses stays Unauthenticated (401).
+func TestAdminGate_OpenfortOutageIsUnavailableNotUnauthenticated(t *testing.T) {
+	adminOnly(t)
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer down.Close()
+	gone := httptest.NewServer(http.NotFoundHandler())
+	goneURL := gone.URL
+	gone.Close() // nothing listening
+
+	for name, base := range map[string]string{"openfort 502": down.URL, "openfort unreachable": goneURL} {
+		cfg := UsersConfig{SecretKey: "sk_test", BaseURL: base}
+		reached, code, denied := gate(t, cfg, "some-opaque-token")
+		if !denied || code != connect.CodeUnavailable || reached {
+			t.Errorf("%s: interceptor code=%v denied=%v reached=%v, want Unavailable", name, code, denied, reached)
+		}
+		h := AdminGateMiddleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("handler ran during an outage") }))
+		r := httptest.NewRequest(http.MethodPost, "/x", nil)
+		r.Header.Set("Authorization", "Bearer some-opaque-token")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: middleware status %d, want 503", name, w.Code)
+		}
+	}
+
+	// Openfort answering "no" is still a 401 / Unauthenticated, not an outage.
+	f := newFakeOpenfort(t, map[string]string{"opaque-admin": "admin@everyflow.io"})
+	if _, code, denied := gate(t, f.cfg(), "garbage"); !denied || code != connect.CodeUnauthenticated {
+		t.Errorf("a refused token: code=%v denied=%v, want Unauthenticated", code, denied)
+	}
+	// ...and a healthy Openfort still lets the admin through.
+	if reached, _, denied := gate(t, f.cfg(), "opaque-admin"); denied || !reached {
+		t.Errorf("a real admin was refused (reached=%v denied=%v)", reached, denied)
+	}
+}
+
+func TestWhoAmI_ClassifiesOutagesButNotRefusals(t *testing.T) {
+	for _, c := range []struct {
+		status      int
+		unavailable bool
+	}{{500, true}, {502, true}, {503, true}, {429, true}, {401, false}, {403, false}, {404, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "x", c.status) }))
+		_, err := UsersConfig{BaseURL: srv.URL}.WhoAmI(context.Background(), "tok")
+		srv.Close()
+		if err == nil || auth.IsUnavailable(err) != c.unavailable {
+			t.Errorf("status %d: err=%v, IsUnavailable=%v, want %v", c.status, err, auth.IsUnavailable(err), c.unavailable)
+		}
+	}
+}
+
+// A token whose email is the allowlisted admin address but which Openfort reports as UNVERIFIED must not
+// pass the admin gate, whether the flag is false or missing.
+func TestAdminGate_UnverifiedAdminEmailIsRefused(t *testing.T) {
+	adminOnly(t)
+	t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", "")
+	f := newFakeOpenfort(t, map[string]string{"opaque-admin": "admin@everyflow.io"})
+
+	if reached, _, denied := gate(t, f.cfg(), "opaque-admin"); !reached || denied {
+		t.Fatalf("control: a verified admin must pass (reached=%v denied=%v)", reached, denied)
+	}
+
+	f.unverified = map[string]bool{"opaque-admin": true}
+	if reached, code, denied := gate(t, f.cfg(), "opaque-admin"); reached || !denied || code != connect.CodeUnauthenticated {
+		t.Errorf("unverified email: reached=%v denied=%v code=%v, want refused as unauthenticated", reached, denied, code)
+	}
+
+	f.unverified, f.omitFlag = nil, true
+	if reached, _, denied := gate(t, f.cfg(), "opaque-admin"); reached || !denied {
+		t.Errorf("missing flag: reached=%v denied=%v, want refused", reached, denied)
+	}
+
+	t.Setenv("OPENFORT_TRUST_UNVERIFIED_EMAIL", "true")
+	if reached, _, denied := gate(t, f.cfg(), "opaque-admin"); !reached || denied {
+		t.Errorf("escape hatch on: reached=%v denied=%v, want admitted", reached, denied)
 	}
 }

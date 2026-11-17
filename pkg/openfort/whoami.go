@@ -12,12 +12,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/factory24/everyflow-system/pkg/auth"
 )
 
 // Me mirrors Openfort's AuthUserResponse (GET /iam/v2/me).
 type Me struct {
-	ID    string  `json:"id"`
-	Email *string `json:"email"`
+	ID            string  `json:"id"`
+	Email         *string `json:"email"`
+	EmailVerified bool    `json:"emailVerified"` // documented as required; absent is treated as false
 }
 
 // WhoAmI asks Openfort who a token belongs to, authenticating as the CALLER
@@ -39,10 +42,14 @@ func (c UsersConfig) WhoAmI(ctx context.Context, callerToken string) (*Me, error
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		// Could not ask: an outage, not a verdict on the token (see auth.IsUnavailable).
+		return nil, fmt.Errorf("%w: %v", auth.ErrOpaqueUnavailable, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("%w: openfort whoami %d", auth.ErrOpaqueUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("openfort whoami %d: %s", resp.StatusCode, string(raw))
 	}
