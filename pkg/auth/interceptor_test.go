@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,5 +277,27 @@ func TestIsUnavailableAndConnectError(t *testing.T) {
 		if IsUnavailable(c.err) != (c.want == connect.CodeUnavailable) {
 			t.Errorf("%s: IsUnavailable = %v", c.name, IsUnavailable(c.err))
 		}
+	}
+}
+
+// The caller of an outage gets a plain message: Openfort's URL and the socket error stay in the log.
+func TestConnectError_UnavailableHidesTheCause(t *testing.T) {
+	cause := fmt.Errorf("%w: Get \"http://10.1.2.3:9911/iam/v2/me\": dial tcp 10.1.2.3:9911: connection refused", ErrOpaqueUnavailable)
+	ce := ConnectError(cause)
+	if connect.CodeOf(ce) != connect.CodeUnavailable {
+		t.Fatalf("code = %v, want unavailable", connect.CodeOf(ce))
+	}
+	msg := ce.Message()
+	for _, leak := range []string{"10.1.2.3", "9911", "iam/v2/me", "dial tcp", "connection refused", "openfort"} {
+		if strings.Contains(strings.ToLower(msg), leak) {
+			t.Errorf("message %q leaks %q", msg, leak)
+		}
+	}
+	if !errors.Is(ce.Unwrap(), ErrVerifierUnavailable) {
+		t.Errorf("message = %q, want it to be ErrVerifierUnavailable", msg)
+	}
+	// A refusal still explains itself (it is the caller's own bad token).
+	if got := ConnectError(ErrOpaqueRejected).Message(); got == "" {
+		t.Errorf("a refusal should keep its reason")
 	}
 }

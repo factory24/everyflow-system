@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -200,6 +201,10 @@ func IsAdminEmail(email string) bool {
 	return false
 }
 
+// ErrVerifierUnavailable is what a caller sees when its token could not be checked right now. It says
+// nothing about the cause: that goes to the log (see ConnectError).
+var ErrVerifierUnavailable = errors.New("could not verify the token right now, please try again")
+
 // IsUnavailable reports whether a verification error means "the token could not be CHECKED" (Openfort or
 // the JWKS endpoint was unreachable or answered 5xx) rather than "the token is bad". Callers must not
 // tell a user their token is invalid in that case: it is an outage, retryable, and the user is still
@@ -213,7 +218,9 @@ func IsUnavailable(err error) bool {
 // this, every failure was Unauthenticated, so an Openfort outage looked like "you are signed out".
 func ConnectError(err error) *connect.Error {
 	if IsUnavailable(err) {
-		return connect.NewError(connect.CodeUnavailable, err)
+		// The detail (Openfort's URL, a socket error) is for our logs, not for the caller.
+		log.Printf("auth: token could not be verified: %v", err)
+		return connect.NewError(connect.CodeUnavailable, ErrVerifierUnavailable)
 	}
 	return connect.NewError(connect.CodeUnauthenticated, err)
 }
